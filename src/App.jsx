@@ -1,12 +1,7 @@
-import DashboardView from './page/views/DashboardView'
+import LiveDashboardView from './page/views/LiveDashboardView'
 
 function App() {
-
-  return (
-    <>
-      <DashboardView />
-    </>
-  )
+  return <LiveDashboardView />
 }
 
 export default App
