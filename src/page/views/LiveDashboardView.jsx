@@ -4,8 +4,10 @@ import { initialRooms } from '../../element/room';
 import { icons } from '../../element/icons';
 import { groups } from '../../element/groups';
 import {
+  applyHomeAssistantState,
   applyHomeAssistantStates,
   callEntityService,
+  connectHomeAssistantEvents,
   fetchStates,
   getHomeAssistantConfig,
   saveHomeAssistantConfig,
@@ -16,7 +18,7 @@ const canControl = (device) => ['light', 'switch', 'vacuum'].includes(device.ent
 
 export default function LiveDashboardView() {
   const [rooms, setRooms] = useState(initialRooms);
-  const [status, setStatus] = useState('loading');
+  const [status, setStatus] = useState(getHomeAssistantConfig().token ? 'connecting' : 'setup');
   const [error, setError] = useState('');
   const [theme, setTheme] = useState(() => localStorage.getItem('homehub-theme') || 'blue');
   const [layout, setLayout] = useState(() => localStorage.getItem('homehub-layout') || 'default');
@@ -31,9 +33,9 @@ export default function LiveDashboardView() {
   const active = useMemo(() => rooms.flatMap((room) => room.devices)
     .filter((device) => device.active && canControl(device)).length, [rooms]);
 
-  async function refresh() {
+  async function refresh({ silent = false } = {}) {
     try {
-      setStatus('loading');
+      if (!silent) setStatus((current) => current === 'connected' ? current : 'connecting');
       setError('');
       const states = await fetchStates();
       setRooms((current) => applyHomeAssistantStates(current, states));
@@ -45,13 +47,26 @@ export default function LiveDashboardView() {
   }
 
   useEffect(() => {
-    if (getHomeAssistantConfig().token) refresh();
-    else setStatus('setup');
+    if (!getHomeAssistantConfig().token) {
+      setStatus('setup');
+      return undefined;
+    }
 
-    const timer = setInterval(() => {
-      if (getHomeAssistantConfig().token) refresh();
-    }, 10000);
-    return () => clearInterval(timer);
+    refresh();
+
+    const disconnect = connectHomeAssistantEvents({
+      onConnected: () => {
+        setStatus('connected');
+        setError('');
+      },
+      onDisconnected: () => setStatus('connecting'),
+      onError: (err) => setError(err.message),
+      onStateChanged: ({ new_state: newState }) => {
+        if (newState) setRooms((current) => applyHomeAssistantState(current, newState));
+      },
+    });
+
+    return disconnect;
   }, []);
 
   useEffect(() => localStorage.setItem('homehub-theme', theme), [theme]);
@@ -59,10 +74,24 @@ export default function LiveDashboardView() {
 
   async function toggle(device) {
     if (!canControl(device)) return;
+
+    const previousActive = device.active;
+    setRooms((current) => current.map((room) => ({
+      ...room,
+      devices: room.devices.map((item) => item.id === device.id
+        ? { ...item, active: !previousActive }
+        : item),
+    })));
+
     try {
       await callEntityService(device.entityId);
-      await refresh();
     } catch (err) {
+      setRooms((current) => current.map((room) => ({
+        ...room,
+        devices: room.devices.map((item) => item.id === device.id
+          ? { ...item, active: previousActive }
+          : item),
+      })));
       setError(err.message);
       setStatus('error');
     }
@@ -71,19 +100,22 @@ export default function LiveDashboardView() {
   function saveConnection(event) {
     event.preventDefault();
     saveHomeAssistantConfig(baseUrl, token.trim());
-    refresh();
+    window.location.reload();
   }
+
+  const showConnectionCard = status === 'setup' || status === 'error';
+  const statusLabel = status === 'connected' ? 'Online' : status === 'connecting' ? 'Connessione…' : 'Da configurare';
 
   return <main data-theme={theme} data-layout={appliedLayout}>
     <style>{css + themeCss + nightCss + mobileHeaderCss + weatherCss + sensorCss + modalCss}</style>
     <aside>
       <div className="brand">HOME<span>HUB</span>
-        <small className="live desktop-live"><i />{status === 'connected' ? 'Home Assistant connesso' : 'Connessione HA'}</small>
+        <small className="live desktop-live"><i />{status === 'connected' ? 'Home Assistant connesso' : statusLabel}</small>
       </div>
       <nav className="open">
         <button className="selected"><FiHome />Panoramica</button>
-        <button onClick={refresh}><FiRefreshCw />Aggiorna</button>
-        <p className="live desktop-live"><i />{status === 'connected' ? 'Sistema connesso' : 'Configurazione richiesta'}</p>
+        <button onClick={() => refresh()}><FiRefreshCw />Aggiorna</button>
+        <p className="live desktop-live"><i />{status === 'connected' ? 'Sistema connesso' : statusLabel}</p>
       </nav>
     </aside>
 
@@ -92,16 +124,16 @@ export default function LiveDashboardView() {
 
       <section className="stats">
         <button><FiZap /><span>Dispositivi attivi<b>{active}</b></span></button>
-        <button><FiActivity /><span>Stato HA<b>{status === 'connected' ? 'Online' : 'Da configurare'}</b></span></button>
+        <button><FiActivity /><span>Stato HA<b>{statusLabel}</b></span></button>
         <button><FiMonitor /><span>Server<b>{baseUrl.replace(/^https?:\/\//, '')}</b></span></button>
       </section>
 
-      {status !== 'connected' && <section className="settings">
+      {showConnectionCard && <section className="settings">
         <article>
           <h2>Collegamento Home Assistant</h2>
           <p>Inserisci l'indirizzo locale e un Long-Lived Access Token. Il token resta nel localStorage di questo browser e non va committato nel repository.</p>
           <form onSubmit={saveConnection} style={{display:'grid', gap:12}}>
-            <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="http://192.168.1.37:8123" />
+            <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="http://192.168.1.37" />
             <input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Long-Lived Access Token" />
             <button type="submit">Salva e collega</button>
           </form>
