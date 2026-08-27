@@ -1,4 +1,4 @@
-const DEFAULT_BASE_URL = 'http://192.168.1.37:8123';
+const DEFAULT_BASE_URL = 'http://192.168.1.37';
 const URL_KEY = 'homehub-ha-url';
 const TOKEN_KEY = 'homehub-ha-token';
 
@@ -55,20 +55,79 @@ export async function callEntityService(entityId, action = 'toggle') {
   });
 }
 
-export function applyHomeAssistantStates(rooms, states) {
-  const byId = new Map(states.map((state) => [state.entity_id, state]));
+function websocketUrl(baseUrl) {
+  const url = new URL(baseUrl);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.pathname = '/api/websocket';
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
 
+export function connectHomeAssistantEvents({ onStateChanged, onConnected, onDisconnected, onError }) {
+  const { baseUrl, token } = getHomeAssistantConfig();
+  if (!token) throw new Error('Token Home Assistant non configurato');
+
+  let closedByClient = false;
+  let socket;
+
+  const connect = () => {
+    socket = new WebSocket(websocketUrl(baseUrl));
+
+    socket.onmessage = (message) => {
+      let payload;
+      try {
+        payload = JSON.parse(message.data);
+      } catch {
+        return;
+      }
+
+      if (payload.type === 'auth_required') {
+        socket.send(JSON.stringify({ type: 'auth', access_token: token }));
+        return;
+      }
+
+      if (payload.type === 'auth_ok') {
+        socket.send(JSON.stringify({ id: 1, type: 'subscribe_events', event_type: 'state_changed' }));
+        onConnected?.();
+        return;
+      }
+
+      if (payload.type === 'auth_invalid') {
+        onError?.(new Error(payload.message || 'Autenticazione WebSocket non valida'));
+        return;
+      }
+
+      if (payload.type === 'event' && payload.event?.event_type === 'state_changed') {
+        onStateChanged?.(payload.event.data);
+      }
+    };
+
+    socket.onerror = () => onError?.(new Error('Errore connessione WebSocket Home Assistant'));
+
+    socket.onclose = () => {
+      onDisconnected?.();
+      if (!closedByClient) setTimeout(connect, 2000);
+    };
+  };
+
+  connect();
+
+  return () => {
+    closedByClient = true;
+    if (socket && socket.readyState <= WebSocket.OPEN) socket.close();
+  };
+}
+
+export function applyHomeAssistantState(rooms, state) {
   return rooms.map((room) => ({
     ...room,
     devices: room.devices.map((device) => {
-      if (!device.entityId) return device;
-      const state = byId.get(device.entityId);
-      if (!state) return { ...device, available: false };
+      if (!device.entityId || device.entityId !== state.entity_id) return device;
 
       const unit = state.attributes?.unit_of_measurement;
-      const rawValue = state.state;
       const value = device.type === 'sensor'
-        ? `${rawValue}${unit ? ` ${unit}` : ''}`
+        ? `${state.state}${unit ? ` ${unit}` : ''}`
         : device.value;
 
       return {
@@ -80,4 +139,8 @@ export function applyHomeAssistantStates(rooms, states) {
       };
     }),
   }));
+}
+
+export function applyHomeAssistantStates(rooms, states) {
+  return states.reduce((current, state) => applyHomeAssistantState(current, state), rooms);
 }
